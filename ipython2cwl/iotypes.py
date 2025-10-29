@@ -254,23 +254,23 @@ class CWLMetadata(dict, _CWLMetadata):
 
     >>> # Basic software metadata
     >>> cwl_metadata: CWLMetadata = {
-    ...     "s:softwareVersion": "2.0.0",
+    ...     "s:softwareVersion": "1.0.0",
     ...     "s:license": "https://spdx.org/licenses/CC-BY-NC-SA-4.0"
     ... }
 
     >>> # Complete metadata with author information
     >>> cwl_metadata: CWLMetadata = {
-    ...     "s:softwareVersion": "2.0.0",
+    ...     "s:softwareVersion": "1.0.0",
     ...     "s:author": [
     ...         {
     ...             "class": "s:Person",
-    ...             "s:identifier": "http://orcid.org/0000-0003-4862-3349",
-    ...             "s:email": "francis.charette-migneault@crim.ca",
-    ...             "s:name": "Francis Charette-Migneault"
+    ...             "s:identifier": "https://orcid.org/0000-0002-9617-8641",
+    ...             "s:email": "gerald.fenoy@geolabs.Fr",
+    ...             "s:name": "Gérald Fenoy"
     ...         }
     ...     ],
-    ...     "s:keywords": ["water-quality", "algae-bloom", "Copernicus", "OSPD", "demo"],
-    ...     "s:codeRepository": "https://gitlab.ogc.org/ogc/ogc-ospd",
+    ...     "s:keywords": ["OSPD", "demo", "mangrove", "detection"],
+    ...     "s:codeRepository": "https://github.com/GeoLabs/KindGrove",
     ...     "s:license": "https://spdx.org/licenses/CC-BY-NC-SA-4.0"
     ... }
 
