@@ -16,7 +16,7 @@ from nbformat.notebooknode import NotebookNode  # type: ignore
 
 from .iotypes import CWLFilePathInput, CWLBooleanInput, CWLIntInput, CWLFloatInput, CWLStringInput, \
     CWLFilePathOutput, CWLDumpableFile, CWLDumpableBinaryFile, CWLDumpable, CWLPNGPlot, CWLPNGFigure, \
-    CWLRequirement
+    CWLRequirement, CWLMetadata, CWLNamespaces
 from .requirements_manager import RequirementsManager
 
 with open(os.sep.join([os.path.abspath(os.path.dirname(__file__)), 'templates', 'template.dockerfile'])) as f:
@@ -92,6 +92,8 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
         self.extracted_variables: List = []
         self.to_dump: List = []
         self.cwl_requirements: Dict = {}
+        self.cwl_metadata: Dict = {}
+        self.cwl_namespaces: Dict = {}
 
     def __get_annotation__(self, type_annotation):
         """Parses the annotation and returns it in a canonical format.
@@ -303,6 +305,102 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
             value=node.value
         )
 
+    def _visit_cwl_metadata(self, node):
+        """Process CWLMetadata annotations to extract CWL schema.org metadata."""
+        try:
+            # Evaluate the dictionary assignment to get the metadata
+            import astor
+            if isinstance(node.value, ast.Dict):
+                # Try to extract the dictionary content
+                for key, value in zip(node.value.keys, node.value.values):
+                    if isinstance(key, (ast.Str, ast.Constant)):
+                        key_str = key.s if hasattr(key, 's') else key.value
+                        
+                        # Handle different value types
+                        if isinstance(value, ast.Dict):
+                            # Parse nested dictionary (for complex structures like author)
+                            nested_dict = {}
+                            for nested_key, nested_value in zip(value.keys, value.values):
+                                if isinstance(nested_key, (ast.Str, ast.Constant)):
+                                    nested_key_str = nested_key.s if hasattr(nested_key, 's') else nested_key.value
+                                    nested_value_val = self._parse_ast_value(nested_value)
+                                    if nested_value_val is not None:
+                                        nested_dict[nested_key_str] = nested_value_val
+                            self.cwl_metadata[key_str] = nested_dict
+                        elif isinstance(value, ast.List):
+                            # Parse lists (for arrays like keywords or multiple authors)
+                            list_values = []
+                            for list_item in value.elts:
+                                if isinstance(list_item, ast.Dict):
+                                    # Handle list of dictionaries (like multiple authors)
+                                    dict_item = {}
+                                    for dict_key, dict_value in zip(list_item.keys, list_item.values):
+                                        if isinstance(dict_key, (ast.Str, ast.Constant)):
+                                            dict_key_str = dict_key.s if hasattr(dict_key, 's') else dict_key.value
+                                            dict_value_val = self._parse_ast_value(dict_value)
+                                            if dict_value_val is not None:
+                                                dict_item[dict_key_str] = dict_value_val
+                                    list_values.append(dict_item)
+                                else:
+                                    # Handle list of simple values
+                                    list_value = self._parse_ast_value(list_item)
+                                    if list_value is not None:
+                                        list_values.append(list_value)
+                            self.cwl_metadata[key_str] = list_values
+                        else:
+                            # Handle simple values
+                            simple_value = self._parse_ast_value(value)
+                            if simple_value is not None:
+                                self.cwl_metadata[key_str] = simple_value
+        except Exception:
+            # If we can't parse it, ignore silently
+            pass
+        
+        # Remove the annotation and return the assignment
+        return ast.Assign(
+            col_offset=node.col_offset,
+            lineno=node.lineno,
+            targets=[node.target],
+            value=node.value
+        )
+
+    def _visit_cwl_namespaces(self, node):
+        """Process CWLNamespaces annotations to extract CWL namespaces."""
+        try:
+            # Evaluate the dictionary assignment to get the namespaces
+            if isinstance(node.value, ast.Dict):
+                # Try to extract the dictionary content
+                for key, value in zip(node.value.keys, node.value.values):
+                    if isinstance(key, (ast.Str, ast.Constant)):
+                        key_str = key.s if hasattr(key, 's') else key.value
+                        # Handle simple values (namespaces are typically simple string mappings)
+                        simple_value = self._parse_ast_value(value)
+                        if simple_value is not None:
+                            self.cwl_namespaces[key_str] = simple_value
+        except Exception:
+            # If we can't parse it, ignore silently
+            pass
+        
+        # Remove the annotation and return the assignment
+        return ast.Assign(
+            col_offset=node.col_offset,
+            lineno=node.lineno,
+            targets=[node.target],
+            value=node.value
+        )
+
+    def _parse_ast_value(self, value_node):
+        """Helper method to parse various AST value types."""
+        if isinstance(value_node, (ast.Str, ast.Constant)):
+            return value_node.s if hasattr(value_node, 's') else value_node.value
+        elif isinstance(value_node, (ast.NameConstant, ast.Constant)) and isinstance(value_node.value, bool):
+            return value_node.value
+        elif hasattr(value_node, 'n'):  # numbers in older Python versions
+            return value_node.n
+        elif hasattr(value_node, 'value') and isinstance(value_node.value, (int, float)):
+            return value_node.value
+        return None
+
     def visit_AnnAssign(self, node):
         try:
             annotation = self.__get_annotation__(node.annotation)
@@ -318,6 +416,10 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
                 return self._visit_output_type(node)
             elif annotation == (CWLRequirement.__name__,):
                 return self._visit_cwl_requirement(node)
+            elif annotation == (CWLMetadata.__name__,):
+                return self._visit_cwl_metadata(node)
+            elif annotation == (CWLNamespaces.__name__,):
+                return self._visit_cwl_namespaces(node)
         except Exception:
             pass
         return node
@@ -367,6 +469,8 @@ class AnnotatedIPython2CWLToolConverter:
             if variable.is_output:
                 self._variables.append(variable)
         self._cwl_requirements = extractor.cwl_requirements
+        self._cwl_metadata = extractor.cwl_metadata
+        self._cwl_namespaces = extractor.cwl_namespaces
 
     @classmethod
     def from_jupyter_notebook_node(cls, node: NotebookNode) -> 'AnnotatedIPython2CWLToolConverter':
@@ -421,7 +525,15 @@ class AnnotatedIPython2CWLToolConverter:
         inputs = [v for v in self._variables if v.is_input]
         outputs = [v for v in self._variables if v.is_output]
 
-        cwl_tool = {
+        # Build CWL tool dictionary with proper ordering
+        cwl_tool = {}
+        
+        # Add namespaces first (if any)
+        if self._cwl_namespaces:
+            cwl_tool['$namespaces'] = self._cwl_namespaces
+        
+        # Add core CWL fields
+        cwl_tool.update({
             'cwlVersion': "v1.1",
             'class': 'CommandLineTool',
             'baseCommand': 'notebookTool',
@@ -446,11 +558,16 @@ class AnnotatedIPython2CWLToolConverter:
                 }
                 for out in outputs
             },
-        }
+        })
         
         # Add extracted CWL requirements
         if self._cwl_requirements:
             cwl_tool['requirements'] = self._cwl_requirements
+        
+        # Add extracted CWL metadata
+        if self._cwl_metadata:
+            cwl_tool.update(self._cwl_metadata)
+            
         return cwl_tool
 
     def compile(self, filename: Path = Path('notebookAsCWLTool.tar')) -> str:

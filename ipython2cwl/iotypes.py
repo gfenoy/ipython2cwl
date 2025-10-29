@@ -237,15 +237,71 @@ class CWLRequirement(dict, _CWLRequirement):
     >>> cwl_requirements: CWLRequirement = {
     ...     "DockerRequirement": {"dockerPull": "osgeo/gdal:latest"}
     ... }
+    """
+    pass
 
-    >>> # Multiple requirements
-    >>> cwl_requirements: CWLRequirement = {
-    ...     "NetworkAccess": {"networkAccess": True},
-    ...     "ResourceRequirement": {
-    ...         "ramMin": 4096,
-    ...         "coresMin": 2
-    ...     }
+
+class _CWLMetadata:
+    """Base class for CWL schema.org metadata annotations."""
+    pass
+
+
+class CWLMetadata(dict, _CWLMetadata):
+    """Use this annotation to define schema.org metadata directly in your notebook.
+    The variable should be assigned a dictionary that will be merged into the CWL metadata section.
+
+    Example usage:
+
+    >>> # Basic software metadata
+    >>> cwl_metadata: CWLMetadata = {
+    ...     "s:softwareVersion": "2.0.0",
+    ...     "s:license": "https://spdx.org/licenses/CC-BY-NC-SA-4.0"
     ... }
 
-    This will be automatically added to the CWL requirements section during conversion.
+    >>> # Complete metadata with author information
+    >>> cwl_metadata: CWLMetadata = {
+    ...     "s:softwareVersion": "2.0.0",
+    ...     "s:author": [
+    ...         {
+    ...             "class": "s:Person",
+    ...             "s:identifier": "http://orcid.org/0000-0003-4862-3349",
+    ...             "s:email": "francis.charette-migneault@crim.ca",
+    ...             "s:name": "Francis Charette-Migneault"
+    ...         }
+    ...     ],
+    ...     "s:keywords": ["water-quality", "algae-bloom", "Copernicus", "OSPD", "demo"],
+    ...     "s:codeRepository": "https://gitlab.ogc.org/ogc/ogc-ospd",
+    ...     "s:license": "https://spdx.org/licenses/CC-BY-NC-SA-4.0"
+    ... }
+
+    This will be automatically added to the CWL metadata section during conversion.
     """
+    pass
+
+
+class _CWLNamespaces:
+    """Base class for CWL namespaces annotations."""
+    pass
+
+
+class CWLNamespaces(dict, _CWLNamespaces):
+    """Use this annotation to define CWL namespaces directly in your notebook.
+    The variable should be assigned a dictionary that will be merged into the CWL $namespaces section.
+
+    Example usage:
+
+    >>> # Define schema.org namespace (most common)
+    >>> cwl_namespaces: CWLNamespaces = {
+    ...     "s": "https://schema.org/"
+    ... }
+
+    >>> # Define multiple namespaces
+    >>> cwl_namespaces: CWLNamespaces = {
+    ...     "s": "https://schema.org/",
+    ...     "edam": "http://edamontology.org/",
+    ...     "iana": "https://www.iana.org/assignments/media-types/"
+    ... }
+
+    This will be automatically added to the CWL $namespaces section during conversion.
+    """
+    pass
