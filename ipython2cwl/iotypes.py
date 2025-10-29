@@ -214,3 +214,38 @@ class CWLPNGFigure(CWLDumpable):
     >>> new_data: CWLPNGFigure = plt.plot(data)
     >>> plt.savefig('new_data.png')
     """
+    pass
+
+
+class _CWLRequirement:
+    """Base class for CWL requirements annotations."""
+    pass
+
+
+class CWLRequirement(dict, _CWLRequirement):
+    """Use this annotation to define CWL requirements directly in your notebook.
+    The variable should be assigned a dictionary that will be merged into the CWL requirements section.
+
+    Example usage:
+
+    >>> # Network access requirement for remote data access
+    >>> cwl_requirements: CWLRequirement = {
+    ...     "NetworkAccess": {"networkAccess": True}
+    ... }
+
+    >>> # Docker requirement with specific image
+    >>> cwl_requirements: CWLRequirement = {
+    ...     "DockerRequirement": {"dockerPull": "osgeo/gdal:latest"}
+    ... }
+
+    >>> # Multiple requirements
+    >>> cwl_requirements: CWLRequirement = {
+    ...     "NetworkAccess": {"networkAccess": True},
+    ...     "ResourceRequirement": {
+    ...         "ramMin": 4096,
+    ...         "coresMin": 2
+    ...     }
+    ... }
+
+    This will be automatically added to the CWL requirements section during conversion.
+    """

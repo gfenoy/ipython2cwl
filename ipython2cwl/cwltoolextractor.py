@@ -15,7 +15,8 @@ import yaml
 from nbformat.notebooknode import NotebookNode  # type: ignore
 
 from .iotypes import CWLFilePathInput, CWLBooleanInput, CWLIntInput, CWLFloatInput, CWLStringInput, \
-    CWLFilePathOutput, CWLDumpableFile, CWLDumpableBinaryFile, CWLDumpable, CWLPNGPlot, CWLPNGFigure
+    CWLFilePathOutput, CWLDumpableFile, CWLDumpableBinaryFile, CWLDumpable, CWLPNGPlot, CWLPNGFigure, \
+    CWLRequirement
 from .requirements_manager import RequirementsManager
 
 with open(os.sep.join([os.path.abspath(os.path.dirname(__file__)), 'templates', 'template.dockerfile'])) as f:
@@ -90,6 +91,7 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
         super().__init__(*args, **kwargs)
         self.extracted_variables: List = []
         self.to_dump: List = []
+        self.cwl_requirements: Dict = {}
 
     def __get_annotation__(self, type_annotation):
         """Parses the annotation and returns it in a canonical format.
@@ -261,6 +263,46 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
             value=node.value
         )
 
+    def _visit_cwl_requirement(self, node):
+        """Process CWLRequirement annotations to extract CWL requirements."""
+        try:
+            # Evaluate the dictionary assignment to get the requirements
+            import astor
+            if isinstance(node.value, ast.Dict):
+                # Try to extract the dictionary content
+                for key, value in zip(node.value.keys, node.value.values):
+                    if isinstance(key, (ast.Str, ast.Constant)):
+                        key_str = key.s if hasattr(key, 's') else key.value
+                        if isinstance(value, ast.Dict):
+                            # Parse nested dictionary
+                            nested_dict = {}
+                            for nested_key, nested_value in zip(value.keys, value.values):
+                                if isinstance(nested_key, (ast.Str, ast.Constant)):
+                                    nested_key_str = nested_key.s if hasattr(nested_key, 's') else nested_key.value
+                                    if isinstance(nested_value, (ast.Str, ast.Constant)):
+                                        nested_value_val = nested_value.s if hasattr(nested_value, 's') else nested_value.value
+                                    elif isinstance(nested_value, (ast.NameConstant, ast.Constant)) and isinstance(nested_value.value, bool):
+                                        nested_value_val = nested_value.value
+                                    elif hasattr(nested_value, 'n'):  # numbers
+                                        nested_value_val = nested_value.n
+                                    elif hasattr(nested_value, 'value') and isinstance(nested_value.value, (int, float)):
+                                        nested_value_val = nested_value.value
+                                    else:
+                                        continue
+                                    nested_dict[nested_key_str] = nested_value_val
+                            self.cwl_requirements[key_str] = nested_dict
+        except Exception:
+            # If we can't parse it, ignore silently
+            pass
+        
+        # Remove the annotation and return the assignment
+        return ast.Assign(
+            col_offset=node.col_offset,
+            lineno=node.lineno,
+            targets=[node.target],
+            value=node.value
+        )
+
     def visit_AnnAssign(self, node):
         try:
             annotation = self.__get_annotation__(node.annotation)
@@ -274,6 +316,8 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
                     return self._visit_user_defined_dumper(node)
             elif annotation in self.output_type_mapper:
                 return self._visit_output_type(node)
+            elif annotation == (CWLRequirement.__name__,):
+                return self._visit_cwl_requirement(node)
         except Exception:
             pass
         return node
@@ -322,6 +366,7 @@ class AnnotatedIPython2CWLToolConverter:
                 self._variables.append(variable)
             if variable.is_output:
                 self._variables.append(variable)
+        self._cwl_requirements = extractor.cwl_requirements
 
     @classmethod
     def from_jupyter_notebook_node(cls, node: NotebookNode) -> 'AnnotatedIPython2CWLToolConverter':
@@ -402,6 +447,10 @@ class AnnotatedIPython2CWLToolConverter:
                 for out in outputs
             },
         }
+        
+        # Add extracted CWL requirements
+        if self._cwl_requirements:
+            cwl_tool['requirements'] = self._cwl_requirements
         return cwl_tool
 
     def compile(self, filename: Path = Path('notebookAsCWLTool.tar')) -> str:
