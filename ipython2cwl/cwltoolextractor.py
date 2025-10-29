@@ -99,12 +99,43 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
         if isinstance(type_annotation, ast.Name):
             annotation = (type_annotation.id,)
         elif isinstance(type_annotation, ast.Str):
-            annotation = (type_annotation.s,)
-            ann_expr = ast.parse(type_annotation.s.strip()).body[0]
-            if hasattr(ann_expr, 'value') and isinstance(ann_expr.value, ast.Subscript):
-                annotation = self.__get_annotation__(ann_expr.value)
+            # Parse the string annotation (Python < 3.8)
+            try:
+                ann_expr = ast.parse(type_annotation.s.strip()).body[0]
+                if hasattr(ann_expr, 'value'):
+                    annotation = self.__get_annotation__(ann_expr.value)
+                else:
+                    annotation = (type_annotation.s,)
+            except Exception:
+                annotation = (type_annotation.s,)
+        elif isinstance(type_annotation, ast.Constant) and isinstance(type_annotation.value, str):
+            # Parse the string annotation (Python >= 3.8)
+            try:
+                ann_expr = ast.parse(type_annotation.value.strip()).body[0]
+                if hasattr(ann_expr, 'value'):
+                    annotation = self.__get_annotation__(ann_expr.value)
+                else:
+                    annotation = (type_annotation.value,)
+            except Exception:
+                annotation = (type_annotation.value,)
         elif isinstance(type_annotation, ast.Subscript):
-            annotation = (type_annotation.value.id, *self.__get_annotation__(type_annotation.slice.value))
+            # Handle both old and new AST formats
+            slice_value = type_annotation.slice
+
+            # Handle Optional[Type] and List[Type] patterns
+            if isinstance(slice_value, ast.Name):
+                inner_annotation = self.__get_annotation__(slice_value)
+            elif isinstance(slice_value, ast.Str):
+                inner_annotation = self.__get_annotation__(slice_value)
+            elif isinstance(slice_value, ast.Constant) and isinstance(slice_value.value, str):
+                # For string constants like "CWLBooleanInput"
+                inner_annotation = (slice_value.value,)
+            elif hasattr(slice_value, 'value'):  # Old format (Python < 3.9)
+                inner_annotation = self.__get_annotation__(slice_value.value)
+            else:
+                inner_annotation = ()
+
+            annotation = (type_annotation.value.id, *inner_annotation)
         elif isinstance(type_annotation, ast.Call):
             annotation = (type_annotation.func.value.id, type_annotation.func.attr)
         return annotation
@@ -164,9 +195,63 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
         # removing type annotation
         return self.conv_AnnAssign_to_Assign(node)
 
+    def _resolve_output_path(self, node):
+        """Resolve output path expressions for CWL glob patterns."""
+        import astor
+        
+        # Simple string constant
+        if hasattr(node.value, 's'):
+            return node.value.s
+        elif hasattr(node.value, 'value') and isinstance(node.value.value, str):
+            return node.value.value
+        
+        # Handle os.path.join() expressions
+        if (isinstance(node.value, ast.Call) and 
+            isinstance(node.value.func, ast.Attribute) and
+            isinstance(node.value.func.value, ast.Attribute) and
+            node.value.func.value.attr == 'path' and
+            node.value.func.attr == 'join'):
+            
+            # Extract arguments from os.path.join(arg1, arg2, ...)
+            args = []
+            for arg in node.value.args:
+                if isinstance(arg, ast.Name):
+                    # Variable name - we'll assume default values
+                    if arg.id == 'output_dir':
+                        args.append('outputs')  # Default output directory
+                    else:
+                        args.append(arg.id)
+                elif hasattr(arg, 's'):
+                    args.append(arg.s)
+                elif hasattr(arg, 'value') and isinstance(arg.value, str):
+                    args.append(arg.value)
+                else:
+                    # Fallback to source code
+                    try:
+                        args.append(astor.to_source(arg).strip().strip("'\""))
+                    except:
+                        args.append(str(arg))
+            
+            # Join with forward slashes for CWL
+            return '/'.join(args)
+        
+        # Fallback: convert to source and try to clean it up
+        try:
+            source = astor.to_source(node.value).strip()
+            # Simple cleanup for common patterns
+            if source.startswith("os.path.join(output_dir, '") and source.endswith("')"):
+                filename = source.split("', '")[1].rstrip("')")
+                return f"outputs/{filename}"
+            return source
+        except:
+            return str(node.value)
+
     def _visit_output_type(self, node):
+        # Resolve the output path for CWL compatibility
+        value_str = self._resolve_output_path(node)
+        
         self.extracted_variables.append(_VariableNameTypePair(
-            node.target.id, None, None, None, False, True, node.value.s)
+            node.target.id, None, None, None, False, True, value_str)
         )
         # removing type annotation
         return ast.Assign(
