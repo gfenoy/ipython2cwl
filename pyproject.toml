@@ -117,12 +117,8 @@ dev-mode = true
 [tool.hatch.envs.default.scripts]
 test = "pytest {args:tests}"
 test-no-docker = "pytest {args:tests}"
-test-cov = "coverage run -m pytest {args:tests}"
-test-cov-no-docker = "coverage run -m pytest {args:tests}"
-test-cov-xml = [
-    "coverage run -m pytest {args:tests}",
-    "coverage xml",
-]
+test-cov = "pytest --cov=ipython2cwl --cov-report=term-missing {args:tests}"
+test-cov-xml = "pytest --cov=ipython2cwl --cov-report=xml --cov-report=term-missing {args:tests}"
 cov-report = [
     "- coverage combine",
     "coverage report",
@@ -173,11 +169,11 @@ testpaths = [
 
 # Coverage configuration
 [tool.coverage.run]
-source_pkgs = ["ipython2cwl", "tests"]
+source = ["ipython2cwl"]
 branch = true
-parallel = true
 omit = [
     "ipython2cwl/__about__.py",
+    "*/tests/*",
 ]
 
 [tool.coverage.paths]
