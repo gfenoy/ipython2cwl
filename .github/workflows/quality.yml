@@ -98,7 +98,8 @@ jobs:
 
     - name: Run MyPy type checking
       run: |
-        mypy ipython2cwl/ --ignore-missing-imports --json-report mypy-report || echo "MyPy found type issues"
+        mypy ipython2cwl/ --ignore-missing-imports --txt-report mypy-report --html-report mypy-report-html || echo "MyPy found type issues"
+        mypy ipython2cwl/ --ignore-missing-imports || echo "MyPy found type issues"
 
     - name: Calculate code complexity
       run: |
@@ -113,6 +114,7 @@ jobs:
         path: |
           pylint-report.json
           mypy-report/
+          mypy-report-html/
           complexity-report.json
 
   documentation:
