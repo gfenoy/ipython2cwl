@@ -34,6 +34,7 @@ does not want to write it, for example to avoid the IO overhead. To bypass that,
 Dumpables annotation. See :func:`~ipython2cwl.iotypes.CWLDumpable.dump` for more details.
 
 """
+
 from typing import Callable
 
 
@@ -50,6 +51,7 @@ class CWLFilePathInput(str, _CWLInput):
     >>> dataset2: 'CWLFilePathInput' = './data/data.csv'
 
     """
+
     pass
 
 
@@ -62,6 +64,7 @@ class CWLBooleanInput(_CWLInput):
     >>> dataset2: 'CWLBooleanInput' = False
 
     """
+
     pass
 
 
@@ -74,6 +77,7 @@ class CWLStringInput(str, _CWLInput):
     >>> dataset2: 'CWLStringInput' = 'yet another message input'
 
     """
+
     pass
 
 
@@ -86,7 +90,9 @@ class CWLIntInput(_CWLInput):
     >>> dataset2: 'CWLIntInput' = 2
 
     """
+
     pass
+
 
 class CWLFloatInput(_CWLInput):
     """Use that hint to annotate that a variable is a float input. You can use the typing annotation
@@ -97,6 +103,7 @@ class CWLFloatInput(_CWLInput):
     >>> dataset2: 'CWLFloatInput' = 2.0
 
     """
+
     pass
 
 
@@ -111,6 +118,7 @@ class CWLFilePathOutput(str, _CWLOutput):
     >>> filename: CWLFilePathOutput = 'data.csv'
 
     """
+
     pass
 
 
@@ -152,6 +160,7 @@ class CWLDumpableFile(CWLDumpable):
 
     and at the CWL, the data, will be mapped as a output.
     """
+
     pass
 
 
@@ -167,6 +176,7 @@ class CWLDumpableBinaryFile(CWLDumpable):
 
     and at the CWL, the data, will be mapped as a output.
     """
+
     pass
 
 
@@ -195,6 +205,7 @@ class CWLPNGPlot(CWLDumpable):
     >>> plt.figure()
     >>> new_data: CWLPNGPlot = plt.plot(data)
     """
+
     pass
 
 
@@ -214,11 +225,13 @@ class CWLPNGFigure(CWLDumpable):
     >>> new_data: CWLPNGFigure = plt.plot(data)
     >>> plt.savefig('new_data.png')
     """
+
     pass
 
 
 class _CWLRequirement:
     """Base class for CWL requirements annotations."""
+
     pass
 
 
@@ -238,11 +251,13 @@ class CWLRequirement(dict, _CWLRequirement):
     ...     "DockerRequirement": {"dockerPull": "osgeo/gdal:latest"}
     ... }
     """
+
     pass
 
 
 class _CWLMetadata:
     """Base class for CWL schema.org metadata annotations."""
+
     pass
 
 
@@ -276,11 +291,13 @@ class CWLMetadata(dict, _CWLMetadata):
 
     This will be automatically added to the CWL metadata section during conversion.
     """
+
     pass
 
 
 class _CWLNamespaces:
     """Base class for CWL namespaces annotations."""
+
     pass
 
 
@@ -304,4 +321,5 @@ class CWLNamespaces(dict, _CWLNamespaces):
 
     This will be automatically added to the CWL $namespaces section during conversion.
     """
+
     pass
