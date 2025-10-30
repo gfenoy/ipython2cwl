@@ -202,7 +202,10 @@ jobs:
         
         print('✅ All CWL features validated successfully!')
         print('Generated CWL structure:')
-        print(json.dumps({k: type(v).__name__ for k, v in cwl_tool.items()}, indent=2))
+        structure = dict()
+        for key, value in cwl_tool.items():
+            structure[key] = type(value).__name__
+        print(json.dumps(structure, indent=2))
         "
         
         # Clean up
