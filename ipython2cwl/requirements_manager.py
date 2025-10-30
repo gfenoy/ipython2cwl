@@ -2,6 +2,13 @@ from typing import List
 import subprocess
 import sys
 
+try:
+    # Python 3.8+
+    from importlib import metadata
+except ImportError:
+    # Backport for older Python versions
+    import importlib_metadata as metadata
+
 
 class RequirementsManager:
     """
@@ -20,14 +27,14 @@ class RequirementsManager:
                 line for line in lines if line and not line.startswith("ipython2cwl")
             ]
         except Exception:
-            # Fallback to pkg_resources if pip freeze fails
+            # Fallback to importlib.metadata if pip freeze fails
             try:
-                import pkg_resources
-
+                # Get all installed distributions using modern importlib.metadata
+                distributions = metadata.distributions()
                 return [
-                    str(package.as_requirement())
-                    for package in pkg_resources.working_set
-                    if package.project_name != "ipython2cwl"
+                    f"{dist.metadata['Name']}=={dist.version}"
+                    for dist in distributions
+                    if dist.metadata['Name'] != "ipython2cwl"
                 ]
             except Exception:
                 return []
