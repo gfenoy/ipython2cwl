@@ -119,9 +119,17 @@ test = "pytest {args:tests}"
 test-no-docker = "pytest {args:tests}"
 test-cov = "coverage run -m pytest {args:tests}"
 test-cov-no-docker = "coverage run -m pytest {args:tests}"
+test-cov-xml = [
+    "coverage run -m pytest {args:tests}",
+    "coverage xml",
+]
 cov-report = [
     "- coverage combine",
     "coverage report",
+]
+cov-xml = [
+    "- coverage combine",
+    "coverage xml",
 ]
 cov-html = [
     "- coverage combine", 

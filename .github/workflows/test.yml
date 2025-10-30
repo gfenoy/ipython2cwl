@@ -53,8 +53,8 @@ jobs:
 
     - name: Run all tests with coverage (excluding Docker tests)
       run: |
-        # Run tests with coverage, excluding Docker-dependent tests
-        hatch run test-cov --ignore=tests/test_system_tests.py \
+        # Run tests with coverage and generate XML report
+        hatch run test-cov-xml --ignore=tests/test_system_tests.py \
           --ignore=tests/test_ipython2cwl_from_repo.py \
           -k "not test_docker_build and not test_repo2cwl" \
           --cov-report=xml --cov-report=term-missing
