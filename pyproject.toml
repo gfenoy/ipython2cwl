@@ -166,6 +166,9 @@ addopts = "-ra -q --strict-markers"
 testpaths = [
     "tests",
 ]
+filterwarnings = [
+    "ignore:pythonjsonlogger.jsonlogger has been moved to pythonjsonlogger.json:DeprecationWarning",
+]
 
 # Coverage configuration
 [tool.coverage.run]
