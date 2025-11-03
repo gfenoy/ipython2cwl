@@ -238,7 +238,7 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
             ).body
         self.extracted_variables.append(
             _VariableNameTypePair(
-                node.target.id, None, None, None, False, True, dumper[1](node)
+                node.target.id, "File", None, None, False, True, dumper[1](node)
             )
         )
         return [*pre_code_body, self.conv_AnnAssign_to_Assign(node), *post_code_body]
@@ -269,7 +269,7 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
         self.to_dump.append([new_dump_node])
         self.extracted_variables.append(
             _VariableNameTypePair(
-                node.target.id, None, None, None, False, True, node.annotation.args[1].s
+                node.target.id, "File", None, None, False, True, node.annotation.args[1].s
             )
         )
         # removing type annotation
