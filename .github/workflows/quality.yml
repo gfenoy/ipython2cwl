@@ -33,11 +33,11 @@ jobs:
 
     - name: Run Safety check
       run: |
-        safety check --json --output safety-report.json || true
+        safety check --save-json safety-report.json || true
         safety check || echo "Safety found vulnerable dependencies"
 
     - name: Upload security reports
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: always()
       with:
         name: security-reports
@@ -62,12 +62,12 @@ jobs:
     - uses: actions/checkout@v4
 
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@v2
+      uses: github/codeql-action/init@v3
       with:
         languages: python
 
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v2
+      uses: github/codeql-action/analyze@v3
 
   quality:
     runs-on: ubuntu-latest
@@ -83,7 +83,7 @@ jobs:
     - name: Install quality tools
       run: |
         python -m pip install --upgrade pip
-        pip install pylint mypy radon complexity-report
+        pip install pylint mypy radon
 
     - name: Install package dependencies
       run: |
@@ -98,7 +98,8 @@ jobs:
 
     - name: Run MyPy type checking
       run: |
-        mypy ipython2cwl/ --ignore-missing-imports --json-report mypy-report || echo "MyPy found type issues"
+        mypy ipython2cwl/ --ignore-missing-imports --txt-report mypy-report --html-report mypy-report-html || echo "MyPy found type issues"
+        mypy ipython2cwl/ --ignore-missing-imports || echo "MyPy found type issues"
 
     - name: Calculate code complexity
       run: |
@@ -106,13 +107,14 @@ jobs:
         radon cc ipython2cwl/ || echo "Complexity analysis completed"
 
     - name: Upload quality reports
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: always()
       with:
         name: quality-reports
         path: |
           pylint-report.json
           mypy-report/
+          mypy-report-html/
           complexity-report.json
 
   documentation:

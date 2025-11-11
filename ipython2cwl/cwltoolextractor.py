@@ -21,6 +21,7 @@ from .iotypes import (
     CWLFloatInput,
     CWLStringInput,
     CWLFilePathOutput,
+    CWLDirectoryPathOutput,
     CWLDumpableFile,
     CWLDumpableBinaryFile,
     CWLDumpable,
@@ -98,7 +99,10 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
         },
     }
 
-    output_type_mapper = {(CWLFilePathOutput.__name__,)}
+    output_type_mapper = {
+        (CWLFilePathOutput.__name__,),
+        (CWLDirectoryPathOutput.__name__,),
+    }
 
     dumpable_mapper = {
         (CWLDumpableFile.__name__,): (
@@ -199,6 +203,15 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
 
     def _visit_input_ann_assign(self, node, annotation):
         mapper = self.input_type_mapper[annotation]
+
+        # Extract the actual value from the assignment
+        value = None
+        if node.value is not None:
+            if isinstance(node.value, ast.Constant):
+                value = node.value.value
+            elif hasattr(node.value, "s"):  # Python < 3.8 compatibility
+                value = node.value.s
+
         self.extracted_variables.append(
             _VariableNameTypePair(
                 node.target.id,
@@ -207,7 +220,7 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
                 not mapper[0].endswith("?"),
                 True,
                 False,
-                None,
+                value,
             )
         )
         return None
@@ -225,7 +238,7 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
             ).body
         self.extracted_variables.append(
             _VariableNameTypePair(
-                node.target.id, None, None, None, False, True, dumper[1](node)
+                node.target.id, "File", None, None, False, True, dumper[1](node)
             )
         )
         return [*pre_code_body, self.conv_AnnAssign_to_Assign(node), *post_code_body]
@@ -256,15 +269,30 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
         self.to_dump.append([new_dump_node])
         self.extracted_variables.append(
             _VariableNameTypePair(
-                node.target.id, None, None, None, False, True, node.annotation.args[1].s
+                node.target.id, "File", None, None, False, True, node.annotation.args[1].s
             )
         )
         # removing type annotation
         return self.conv_AnnAssign_to_Assign(node)
 
+    def _resolve_variable_value(self, var_name):
+        """Resolve the value of a variable from extracted variables."""
+        for var in self.extracted_variables:
+            if var.name == var_name and var.is_input:
+                return var.value
+        return None
+
     def _resolve_output_path(self, node):
         """Resolve output path expressions for CWL glob patterns."""
         import astor
+
+        # Handle direct variable reference
+        if isinstance(node.value, ast.Name):
+            var_value = self._resolve_variable_value(node.value.id)
+            if var_value is not None:
+                return var_value
+            # Fallback to variable name if not found
+            return node.value.id
 
         # Simple string constant
         if hasattr(node.value, "s"):
@@ -285,10 +313,12 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
             args = []
             for arg in node.value.args:
                 if isinstance(arg, ast.Name):
-                    # Variable name - we'll assume default values
-                    if arg.id == "output_dir":
-                        args.append("outputs")  # Default output directory
+                    # Try to resolve variable value first
+                    var_value = self._resolve_variable_value(arg.id)
+                    if var_value is not None:
+                        args.append(var_value)
                     else:
+                        # Fallback to variable name
                         args.append(arg.id)
                 elif hasattr(arg, "s"):
                     args.append(arg.s)
@@ -317,13 +347,19 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
         except:
             return str(node.value)
 
-    def _visit_output_type(self, node):
+    def _visit_output_type(self, node, annotation):
         # Resolve the output path for CWL compatibility
         value_str = self._resolve_output_path(node)
 
+        # Determine CWL type based on annotation
+        if annotation == (CWLDirectoryPathOutput.__name__,):
+            cwl_type = "Directory"
+        else:  # CWLFilePathOutput
+            cwl_type = "File"
+
         self.extracted_variables.append(
             _VariableNameTypePair(
-                node.target.id, None, None, None, False, True, value_str
+                node.target.id, cwl_type, None, None, False, True, value_str
             )
         )
         # removing type annotation
@@ -566,7 +602,7 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
                 else:
                     return self._visit_user_defined_dumper(node)
             elif annotation in self.output_type_mapper:
-                return self._visit_output_type(node)
+                return self._visit_output_type(node, annotation)
             elif annotation == (CWLRequirement.__name__,):
                 return self._visit_cwl_requirement(node)
             elif annotation == (CWLMetadata.__name__,):
@@ -713,7 +749,7 @@ class AnnotatedIPython2CWLToolConverter:
                     for input_var in inputs
                 },
                 "outputs": {
-                    out.name: {"type": "File", "outputBinding": {"glob": out.value}}
+                    out.name: {"type": out.cwl_typeof, "outputBinding": {"glob": out.value}}
                     for out in outputs
                 },
             }

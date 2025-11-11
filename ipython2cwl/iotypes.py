@@ -21,6 +21,8 @@ Each variable can be an input or an output. The basic data types are:
 
   * CWLFilePathOutput
 
+  * CWLDirectoryPathOutput
+
   * CWLDumpableFile
 
   * CWLDumpableBinaryFile
@@ -116,6 +118,18 @@ class CWLFilePathOutput(str, _CWLOutput):
     as a string by importing it. The generated file will be mapped as a CWL output.
 
     >>> filename: CWLFilePathOutput = 'data.csv'
+
+    """
+
+    pass
+
+
+class CWLDirectoryPathOutput(str, _CWLOutput):
+    """Use that hint to annotate that a variable is a string-path to an output directory. You can use the typing annotation
+    as a string by importing it. The generated directory will be mapped as a CWL output with type Directory.
+
+    >>> output_dir: CWLDirectoryPathOutput = 'results/'
+    >>> analysis_output: 'CWLDirectoryPathOutput' = './output_folder'
 
     """
 
