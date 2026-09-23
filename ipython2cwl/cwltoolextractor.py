@@ -9,7 +9,11 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Dict, Any, List, Tuple
 
-import astor  # type: ignore
+try:  # Python >= 3.9
+    from ast import unparse as _ast_unparse
+except ImportError:  # pragma: no cover
+    _ast_unparse = None
+    import astor  # type: ignore
 import nbconvert  # type: ignore
 import yaml
 from nbformat.notebooknode import NotebookNode  # type: ignore
@@ -32,6 +36,38 @@ from .iotypes import (
     CWLNamespaces,
 )
 from .requirements_manager import RequirementsManager
+
+# Python 3.14 removed ast.Str, ast.Num and ast.NameConstant (deprecated since 3.8, when
+# ast.Constant replaced them); keep them only where they still exist.
+_CONSTANT_TYPES = tuple(
+    getattr(ast, name)
+    for name in ("Constant", "Str", "Num", "NameConstant", "Bytes")
+    if hasattr(ast, name)
+)
+
+
+def _is_legacy_str(node) -> bool:
+    """True for a string node of the pre-3.8 AST (ast.Str)."""
+    legacy = getattr(ast, "Str", None)
+    return legacy is not None and legacy is not ast.Constant and isinstance(node, legacy)
+
+
+def _constant_value(node):
+    """Value of a constant node, whatever the Python version."""
+    if isinstance(node, ast.Constant):
+        return node.value
+    for attribute in ("s", "n"):
+        if hasattr(node, attribute):
+            return getattr(node, attribute)
+    return None
+
+
+def _to_source(node) -> str:
+    """Python source of an AST node (ast.unparse, or astor before Python 3.9)."""
+    if _ast_unparse is not None:
+        return _ast_unparse(ast.fix_missing_locations(node))
+    return astor.to_source(node)  # pragma: no cover
+
 
 with open(
     os.sep.join(
@@ -146,16 +182,16 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
         annotation = None
         if isinstance(type_annotation, ast.Name):
             annotation = (type_annotation.id,)
-        elif isinstance(type_annotation, ast.Str):
+        elif _is_legacy_str(type_annotation):
             # Parse the string annotation (Python < 3.8)
             try:
-                ann_expr = ast.parse(type_annotation.s.strip()).body[0]
+                ann_expr = ast.parse(_constant_value(type_annotation).strip()).body[0]
                 if hasattr(ann_expr, "value"):
                     annotation = self.__get_annotation__(ann_expr.value)
                 else:
-                    annotation = (type_annotation.s,)
+                    annotation = (_constant_value(type_annotation),)
             except Exception:
-                annotation = (type_annotation.s,)
+                annotation = (_constant_value(type_annotation),)
         elif isinstance(type_annotation, ast.Constant) and isinstance(
             type_annotation.value, str
         ):
@@ -175,7 +211,7 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
             # Handle Optional[Type] and List[Type] patterns
             if isinstance(slice_value, ast.Name):
                 inner_annotation = self.__get_annotation__(slice_value)
-            elif isinstance(slice_value, ast.Str):
+            elif _is_legacy_str(slice_value):
                 inner_annotation = self.__get_annotation__(slice_value)
             elif isinstance(slice_value, ast.Constant) and isinstance(
                 slice_value.value, str
@@ -204,13 +240,14 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
     def _visit_input_ann_assign(self, node, annotation):
         mapper = self.input_type_mapper[annotation]
 
-        # Extract the actual value from the assignment
+        # Extract the actual value from the assignment (any Python literal:
+        # numbers, negative numbers, strings, booleans, lists of literals)
         value = None
         if node.value is not None:
-            if isinstance(node.value, ast.Constant):
-                value = node.value.value
-            elif hasattr(node.value, "s"):  # Python < 3.8 compatibility
-                value = node.value.s
+            try:
+                value = ast.literal_eval(node.value)
+            except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+                value = None
 
         self.extracted_variables.append(
             _VariableNameTypePair(
@@ -269,7 +306,7 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
         self.to_dump.append([new_dump_node])
         self.extracted_variables.append(
             _VariableNameTypePair(
-                node.target.id, "File", None, None, False, True, node.annotation.args[1].s
+                node.target.id, "File", None, None, False, True, _constant_value(node.annotation.args[1])
             )
         )
         # removing type annotation
@@ -282,9 +319,77 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
                 return var.value
         return None
 
+    # pathlib attributes and their CWL File counterparts
+    _PATH_ATTRIBUTES_TO_CWL = {
+        "stem": "nameroot",
+        "name": "basename",
+        "suffix": "nameext",
+    }
+
+    def _is_input_variable(self, var_name):
+        return any(v.name == var_name and v.is_input for v in self.extracted_variables)
+
+    def _formatted_value_to_glob(self, value_node):
+        """Translate the expression of an f-string placeholder into a CWL
+        parameter reference when it only depends on tool inputs:
+
+        * ``{band}``                        -> ``$(inputs.band)``
+        * ``{band_file.stem}``              -> ``$(inputs.band_file.nameroot)``
+        * ``{Path(band_file).stem}``        -> ``$(inputs.band_file.nameroot)``
+        * ``{os.path.basename(band_file)}`` -> ``$(inputs.band_file.basename)``
+
+        Anything else becomes a ``*`` wildcard."""
+        if isinstance(value_node, ast.Name) and self._is_input_variable(value_node.id):
+            return f"$(inputs.{value_node.id})"
+        if (
+            isinstance(value_node, ast.Attribute)
+            and value_node.attr in self._PATH_ATTRIBUTES_TO_CWL
+        ):
+            target = value_node.value
+            if (
+                isinstance(target, ast.Call)
+                and len(target.args) == 1
+                and (
+                    (isinstance(target.func, ast.Name) and target.func.id == "Path")
+                    or (
+                        isinstance(target.func, ast.Attribute)
+                        and target.func.attr == "Path"
+                    )
+                )
+            ):
+                target = target.args[0]
+            if isinstance(target, ast.Name) and self._is_input_variable(target.id):
+                cwl_attr = self._PATH_ATTRIBUTES_TO_CWL[value_node.attr]
+                return f"$(inputs.{target.id}.{cwl_attr})"
+        if (
+            isinstance(value_node, ast.Call)
+            and isinstance(value_node.func, ast.Attribute)
+            and value_node.func.attr == "basename"
+            and len(value_node.args) == 1
+            and isinstance(value_node.args[0], ast.Name)
+            and self._is_input_variable(value_node.args[0].id)
+        ):
+            return f"$(inputs.{value_node.args[0].id}.basename)"
+        return "*"
+
+    def _joined_str_to_glob(self, node):
+        """Translate an f-string into a CWL glob pattern."""
+        parts = []
+        for value in node.values:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                parts.append(value.value)
+            elif isinstance(value, ast.FormattedValue):
+                parts.append(self._formatted_value_to_glob(value.value))
+            else:
+                parts.append("*")
+        return "".join(parts)
+
     def _resolve_output_path(self, node):
         """Resolve output path expressions for CWL glob patterns."""
-        import astor
+
+        # f-string: f"{band}.tif" -> "$(inputs.band).tif"
+        if isinstance(node.value, ast.JoinedStr):
+            return self._joined_str_to_glob(node.value)
 
         # Handle direct variable reference
         if isinstance(node.value, ast.Name):
@@ -295,10 +400,10 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
             return node.value.id
 
         # Simple string constant
-        if hasattr(node.value, "s"):
-            return node.value.s
-        elif hasattr(node.value, "value") and isinstance(node.value.value, str):
-            return node.value.value
+        if isinstance(node.value, _CONSTANT_TYPES) and isinstance(
+            _constant_value(node.value), str
+        ):
+            return _constant_value(node.value)
 
         # Handle os.path.join() expressions
         if (
@@ -320,14 +425,16 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
                     else:
                         # Fallback to variable name
                         args.append(arg.id)
-                elif hasattr(arg, "s"):
-                    args.append(arg.s)
-                elif hasattr(arg, "value") and isinstance(arg.value, str):
-                    args.append(arg.value)
+                elif isinstance(arg, ast.JoinedStr):
+                    args.append(self._joined_str_to_glob(arg))
+                elif isinstance(arg, _CONSTANT_TYPES) and isinstance(
+                    _constant_value(arg), str
+                ):
+                    args.append(_constant_value(arg))
                 else:
                     # Fallback to source code
                     try:
-                        args.append(astor.to_source(arg).strip().strip("'\""))
+                        args.append(_to_source(arg).strip().strip("'\""))
                     except:
                         args.append(str(arg))
 
@@ -336,7 +443,7 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
 
         # Fallback: convert to source and try to clean it up
         try:
-            source = astor.to_source(node.value).strip()
+            source = _to_source(node.value).strip()
             # Simple cleanup for common patterns
             if source.startswith("os.path.join(output_dir, '") and source.endswith(
                 "')"
@@ -383,30 +490,26 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
             if isinstance(dict_node, ast.Dict):
                 # Try to extract the dictionary content
                 for key, value in zip(dict_node.keys, dict_node.values):
-                    if isinstance(key, (ast.Str, ast.Constant)):
-                        key_str = key.s if hasattr(key, "s") else key.value
+                    if isinstance(key, _CONSTANT_TYPES):
+                        key_str = _constant_value(key)
                         if isinstance(value, ast.Dict):
                             # Parse nested dictionary
                             nested_dict = {}
                             for nested_key, nested_value in zip(
                                 value.keys, value.values
                             ):
-                                if isinstance(nested_key, (ast.Str, ast.Constant)):
+                                if isinstance(nested_key, _CONSTANT_TYPES):
                                     nested_key_str = (
-                                        nested_key.s
-                                        if hasattr(nested_key, "s")
-                                        else nested_key.value
+                                        _constant_value(nested_key)
                                     )
                                     if isinstance(
-                                        nested_value, (ast.Str, ast.Constant)
+                                        nested_value, _CONSTANT_TYPES
                                     ):
                                         nested_value_val = (
-                                            nested_value.s
-                                            if hasattr(nested_value, "s")
-                                            else nested_value.value
+                                            _constant_value(nested_value)
                                         )
                                     elif isinstance(
-                                        nested_value, (ast.NameConstant, ast.Constant)
+                                        nested_value, _CONSTANT_TYPES
                                     ) and isinstance(nested_value.value, bool):
                                         nested_value_val = nested_value.value
                                     elif hasattr(nested_value, "n"):  # numbers
@@ -444,8 +547,8 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
             if isinstance(dict_node, ast.Dict):
                 # Try to extract the dictionary content
                 for key, value in zip(dict_node.keys, dict_node.values):
-                    if isinstance(key, (ast.Str, ast.Constant)):
-                        key_str = key.s if hasattr(key, "s") else key.value
+                    if isinstance(key, _CONSTANT_TYPES):
+                        key_str = _constant_value(key)
 
                         # Handle different value types
                         if isinstance(value, ast.Dict):
@@ -454,11 +557,9 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
                             for nested_key, nested_value in zip(
                                 value.keys, value.values
                             ):
-                                if isinstance(nested_key, (ast.Str, ast.Constant)):
+                                if isinstance(nested_key, _CONSTANT_TYPES):
                                     nested_key_str = (
-                                        nested_key.s
-                                        if hasattr(nested_key, "s")
-                                        else nested_key.value
+                                        _constant_value(nested_key)
                                     )
                                     nested_value_val = self._parse_ast_value(
                                         nested_value
@@ -477,12 +578,10 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
                                         list_item.keys, list_item.values
                                     ):
                                         if isinstance(
-                                            dict_key, (ast.Str, ast.Constant)
+                                            dict_key, _CONSTANT_TYPES
                                         ):
                                             dict_key_str = (
-                                                dict_key.s
-                                                if hasattr(dict_key, "s")
-                                                else dict_key.value
+                                                _constant_value(dict_key)
                                             )
                                             dict_value_val = self._parse_ast_value(
                                                 dict_value
@@ -526,8 +625,8 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
             if isinstance(dict_node, ast.Dict):
                 # Try to extract the dictionary content
                 for key, value in zip(dict_node.keys, dict_node.values):
-                    if isinstance(key, (ast.Str, ast.Constant)):
-                        key_str = key.s if hasattr(key, "s") else key.value
+                    if isinstance(key, _CONSTANT_TYPES):
+                        key_str = _constant_value(key)
                         # Handle simple values (namespaces are typically simple string mappings)
                         simple_value = self._parse_ast_value(value)
                         if simple_value is not None:
@@ -546,9 +645,9 @@ class AnnotatedVariablesExtractor(ast.NodeTransformer):
 
     def _parse_ast_value(self, value_node):
         """Helper method to parse various AST value types."""
-        if isinstance(value_node, (ast.Str, ast.Constant)):
-            return value_node.s if hasattr(value_node, "s") else value_node.value
-        elif isinstance(value_node, (ast.NameConstant, ast.Constant)) and isinstance(
+        if isinstance(value_node, _CONSTANT_TYPES):
+            return _constant_value(value_node)
+        elif isinstance(value_node, _CONSTANT_TYPES) and isinstance(
             value_node.value, bool
         ):
             return value_node.value
@@ -698,7 +797,7 @@ class AnnotatedIPython2CWLToolConverter:
             for node in main_function.body
             if isinstance(node, ast.FunctionDef) and node.name == "main"
         ][0].body = tree.body
-        return astor.to_source(main_function)
+        return _to_source(main_function)
 
     @classmethod
     def __get_add_arguments__(cls, variables):
@@ -712,11 +811,35 @@ class AnnotatedIPython2CWLToolConverter:
             if is_array:
                 arg += f'nargs="+", '
             if is_optional:
-                arg += f"default=None, "
+                arg += f"default={cls._literal_default(variable)!r}, "
             arg = arg.strip()
             arg += ")"
             args.append(arg)
         return args
+
+    @classmethod
+    def _literal_default(cls, variable):
+        """Default value of an optional input: the literal assigned in the
+        notebook, when there is one. File inputs never get a default (a CWL File
+        default needs a location, which a notebook value is not)."""
+        if not variable.cwl_typeof.endswith("?"):
+            return None
+        if variable.cwl_typeof.startswith("File"):
+            return None
+        if variable.value is None or isinstance(variable.value, (dict, set, tuple)):
+            return None
+        return variable.value
+
+    @classmethod
+    def _cwl_input(cls, input_var) -> Dict:
+        cwl_input = {
+            "type": input_var.cwl_typeof,
+            "inputBinding": {"prefix": f"--{input_var.name}"},
+        }
+        default = cls._literal_default(input_var)
+        if default is not None:
+            cwl_input["default"] = default
+        return cwl_input
 
     def cwl_command_line_tool(self, docker_image_id: str = "jn2cwl:latest") -> Dict:
         """
@@ -742,11 +865,7 @@ class AnnotatedIPython2CWLToolConverter:
                 "hints": {"DockerRequirement": {"dockerImageId": docker_image_id}},
                 "arguments": ["--"],
                 "inputs": {
-                    input_var.name: {
-                        "type": input_var.cwl_typeof,
-                        "inputBinding": {"prefix": f"--{input_var.name}"},
-                    }
-                    for input_var in inputs
+                    input_var.name: self._cwl_input(input_var) for input_var in inputs
                 },
                 "outputs": {
                     out.name: {"type": out.cwl_typeof, "outputBinding": {"glob": out.value}}

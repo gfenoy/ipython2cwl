@@ -55,7 +55,7 @@ class Test2CWLFromRepo(TestCase):
         self.assertEqual(
             '+',  # nargs = '+'
             [
-                k.value.s
+                k.value.value
                 for k in messages_array_arg_line.body[0].value.keywords
                 if k.arg == 'nargs'
             ][0],
@@ -76,7 +76,7 @@ class Test2CWLFromRepo(TestCase):
             if isinstance(x, ast.Expr)
             and isinstance(x.value, ast.Call)
             and len(x.value.args) > 0
-            and x.value.args[0].s == '--optional_message'
+            and x.value.args[0].value == '--optional_message'
         ][0]
         self.assertEqual(
             False,

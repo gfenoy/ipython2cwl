@@ -64,7 +64,7 @@ setup(
     },
     install_requires=[
         'nbformat>=5.0.6',
-        'astor>=0.8.1',
+        'astor>=0.8.1; python_version < "3.9"',
         'PyYAML>=5.3.1',
         'gitpython>=3.1.3',
         'jupyter-repo2docker>=0.11.0',

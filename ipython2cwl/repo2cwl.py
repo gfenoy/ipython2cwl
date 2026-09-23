@@ -16,6 +16,14 @@ from git import Repo
 from repo2docker import Repo2Docker  # type: ignore
 
 from .cwltoolextractor import AnnotatedIPython2CWLToolConverter
+from .step_images import build_step_image, step_image_name
+from .workflow import (
+    WorkflowBuilder,
+    WorkflowError,
+    load_cwl_tool,
+    load_manifest,
+    numbered_notebooks,
+)
 
 logger = logging.getLogger("repo2cwl")
 logger.setLevel(logging.INFO)
@@ -80,6 +88,19 @@ def _store_jn_as_script(
     return tool, script_relative_path
 
 
+class _CWLDumper(yaml.SafeDumper):
+    """Safe dumper writing multi-line strings (doc, scripts) as literal blocks."""
+
+
+def _represent_str(dumper: yaml.SafeDumper, data: str):
+    if "\n" in data:
+        return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
+    return dumper.represent_scalar("tag:yaml.org,2002:str", data)
+
+
+_CWLDumper.add_representer(str, _represent_str)
+
+
 def existing_path(path_str: str):
     path: Path = Path(path_str)
     if not path.is_dir():
@@ -97,10 +118,64 @@ def parser_arguments(argv: List[str]):
         type=existing_path,
         required=True,
     )
-    return parser.parse_args(argv)
+    workflow = parser.add_argument_group(
+        "workflow generation",
+        "Besides one CommandLineTool per annotated notebook, generate a packed CWL "
+        "Workflow chaining them.",
+    )
+    workflow.add_argument(
+        "--workflow",
+        metavar="ID",
+        help="Generate a workflow with this id from the numbered notebooks of the "
+        "repository (01_name.ipynb, 02_name.ipynb, ...), wired by variable names",
+    )
+    workflow.add_argument(
+        "--workflow-manifest",
+        metavar="PATH",
+        help="Workflow manifest (YAML) listing the steps and overriding the wiring; "
+        "implies workflow generation. Looked up in the repository first, then as a "
+        "local path; notebook and run paths in it are relative to the manifest when it "
+        "is in the repository, to the repository root otherwise",
+    )
+    image = parser.add_argument_group("container image")
+    image.add_argument(
+        "--docker-pull",
+        metavar="IMAGE",
+        help="Name the built image IMAGE and reference it with DockerRequirement."
+        "dockerPull (e.g. ghcr.io/org/repo:tag) instead of a local dockerImageId",
+    )
+    image.add_argument(
+        "--per-step-images",
+        action="store_true",
+        help="Build one image per notebook tool on top of the repository image "
+        "(requires --docker-pull, which names the base image); each tool references "
+        "its own image. Image names follow --step-image-template",
+    )
+    image.add_argument(
+        "--step-image-template",
+        metavar="TEMPLATE",
+        help="Name of the step images; fields {prefix} (base image repository without "
+        "its last component), {repository}, {name} (step name) and {tag} (base image "
+        "tag). Default: {prefix}/{name}:{tag}. A manifest step can set `image`",
+    )
+    image.add_argument(
+        "--skip-build",
+        action="store_true",
+        help="Do not build the image (requires --docker-pull); only write the CWL files",
+    )
+    args = parser.parse_args(argv)
+    if args.skip_build and not args.docker_pull:
+        parser.error("--skip-build requires --docker-pull")
+    if args.per_step_images and not args.docker_pull:
+        parser.error("--per-step-images requires --docker-pull (the base image name)")
+    if args.step_image_template and not args.per_step_images:
+        parser.error("--step-image-template requires --per-step-images")
+    return args
 
 
 def setup_logger():
+    if logger.handlers:
+        return
     handler = logging.StreamHandler(sys.stdout)
     handler.setLevel(logging.INFO)
     formatter = logging.Formatter(
@@ -141,20 +216,176 @@ def repo2cwl(argv: Optional[List[str]] = None) -> int:
         logger.info(f"cloning repo to temp directory: {local_git_directory}")
         local_git = git.Repo.clone_from(uri.geturl(), local_git_directory)
 
-    image_id, cwl_tools = _repo2cwl(local_git)
-    logger.info(f"Generated image id: {image_id}")
-    for tool in cwl_tools:
-        base_command_script_name = (
-            f'{tool["baseCommand"][len("/app/cwl/bin/"):].replace("/", "_")}.cwl'
+    try:
+        manifest = None
+        if args.workflow_manifest:
+            # check the manifest before the (long) image build
+            manifest = _locate_manifest(local_git_directory, args.workflow_manifest)
+            _check_manifest_paths(local_git_directory, *manifest)
+        image_overrides = (
+            _manifest_images(local_git_directory, *manifest) if manifest else {}
         )
-        tool_filename = str(output_directory.joinpath(base_command_script_name))
-        with open(tool_filename, "w") as f:
-            logger.info(f"Creating CWL command line tool: {tool_filename}")
-            yaml.safe_dump(tool, f)
+        if image_overrides and not args.per_step_images:
+            logger.warning(
+                "The manifest sets step images; they are only used with --per-step-images"
+            )
+        image_id, notebook_tools = _repo2cwl_tools(
+            local_git,
+            build=not args.skip_build,
+            docker_pull=args.docker_pull,
+            per_step_images=args.per_step_images,
+            step_image_template=args.step_image_template,
+            image_overrides=image_overrides,
+        )
+        logger.info(f"Generated image id: {image_id}")
+        images = [image_id] + sorted(
+            {
+                tool["hints"]["DockerRequirement"]["dockerPull"]
+                for _, tool in notebook_tools
+                if "dockerPull" in tool["hints"]["DockerRequirement"]
+            }
+            - {image_id}
+        )
+        images_filename = str(output_directory.joinpath("images.txt"))
+        with open(images_filename, "w") as f:
+            # images to publish: the base image then the step images
+            f.write("\n".join(images) + "\n")
+        logger.info(f"Images referenced by the tools listed in {images_filename}")
+        for _, tool in notebook_tools:
+            base_command_script_name = (
+                f'{tool["baseCommand"][len("/app/cwl/bin/"):].replace("/", "_")}.cwl'
+            )
+            tool_filename = str(output_directory.joinpath(base_command_script_name))
+            with open(tool_filename, "w") as f:
+                logger.info(f"Creating CWL command line tool: {tool_filename}")
+                yaml.safe_dump(tool, f, allow_unicode=True)
 
-    logger.info(f"Cleaning local temporary directory {local_git_directory}...")
-    shutil.rmtree(local_git_directory)
+        if args.workflow or args.workflow_manifest:
+            workflow = _build_workflow(
+                local_git_directory,
+                dict(notebook_tools),
+                workflow_id=args.workflow,
+                manifest=manifest,
+            )
+            workflow_id = workflow["$graph"][0]["id"]
+            workflow_filename = str(output_directory.joinpath(f"{workflow_id}.cwl"))
+            with open(workflow_filename, "w") as f:
+                logger.info(f"Creating CWL workflow: {workflow_filename}")
+                yaml.dump(
+                    workflow, f, Dumper=_CWLDumper, sort_keys=False, allow_unicode=True
+                )
+    finally:
+        logger.info(f"Cleaning local temporary directory {local_git_directory}...")
+        shutil.rmtree(local_git_directory)
     return 0
+
+
+def _locate_manifest(repo_directory: str, manifest_arg: str) -> Tuple[str, str]:
+    """Find the workflow manifest.
+
+    :return: (manifest file, directory its notebook/run paths are relative to)
+    """
+    candidates = []
+    if not os.path.isabs(manifest_arg):
+        in_repo = os.path.join(repo_directory, manifest_arg)
+        candidates.append(in_repo)
+        if os.path.isfile(in_repo):
+            return in_repo, os.path.dirname(in_repo)
+    local = os.path.abspath(manifest_arg)
+    candidates.append(local)
+    if os.path.isfile(local):
+        logger.info(
+            f"Workflow manifest {local} is outside the repository: its paths are "
+            "taken relative to the repository root"
+        )
+        return local, repo_directory
+    raise WorkflowError(
+        f"workflow manifest {manifest_arg} not found (looked for "
+        + " and ".join(candidates)
+        + "); it must be in the repository given to repo2cwl, or be a local path"
+    )
+
+
+def _manifest_images(repo_directory: str, manifest_file: str, base: str) -> Dict[str, str]:
+    """Step images set in the manifest: notebook path (relative to the repo) -> image."""
+    images = {}
+    for step in load_manifest(manifest_file)["steps"]:
+        if "image" not in step:
+            continue
+        if "notebook" not in step:
+            raise WorkflowError(
+                f"{manifest_file}: `image` only applies to notebook steps "
+                f"(step {step.get('id') or step.get('run')})"
+            )
+        notebook = os.path.normpath(
+            os.path.relpath(os.path.join(base, step["notebook"]), repo_directory)
+        )
+        images[notebook] = step["image"]
+    return images
+
+
+def _check_manifest_paths(repo_directory: str, manifest_file: str, base: str) -> None:
+    """Fail early when a step of the manifest points to a missing file."""
+    manifest = load_manifest(manifest_file)
+    missing = []
+    for step in manifest["steps"]:
+        path = step.get("notebook") or step.get("run")
+        if not os.path.isfile(os.path.join(base, path)):
+            missing.append(path)
+    if missing:
+        raise WorkflowError(
+            f"{manifest_file}: step files not found in the repository "
+            f"({repo_directory}): {', '.join(missing)}"
+        )
+
+
+def _build_workflow(
+    repo_directory: str,
+    notebook_tools: Dict[str, Dict],
+    workflow_id: Optional[str] = None,
+    manifest: Optional[Tuple[str, str]] = None,
+) -> Dict:
+    """Assemble the notebook tools into a packed workflow.
+
+    :param repo_directory: root of the repository
+    :param notebook_tools: notebook path (relative to the root) -> CommandLineTool
+    :param workflow_id: workflow id (convention mode, or default id with a manifest)
+    :param manifest: (manifest file, base directory of its paths), see _locate_manifest
+    """
+    notebook_tools = {os.path.normpath(k): v for k, v in notebook_tools.items()}
+    if manifest:
+        manifest_file, manifest_directory = manifest
+        manifest_path = os.path.basename(manifest_file)
+        manifest = load_manifest(manifest_file)
+        builder = WorkflowBuilder(workflow_id or "workflow", manifest)
+        for step in manifest["steps"]:
+            if "notebook" in step:
+                notebook = os.path.normpath(
+                    os.path.relpath(
+                        os.path.join(manifest_directory, step["notebook"]), repo_directory
+                    )
+                )
+                if notebook not in notebook_tools:
+                    raise WorkflowError(
+                        f"{manifest_path}: notebook {step['notebook']} not found or "
+                        "without ipython2cwl annotations"
+                    )
+                builder.add_step(notebook, notebook_tools[notebook], step)
+            else:
+                run = os.path.join(manifest_directory, step["run"])
+                builder.add_step(
+                    os.path.relpath(run, repo_directory), load_cwl_tool(run), step
+                )
+    else:
+        builder = WorkflowBuilder(workflow_id or "workflow")
+        steps = numbered_notebooks(list(notebook_tools), ".")
+        if not steps:
+            raise WorkflowError(
+                "no numbered notebook (01_name.ipynb, ...) with ipython2cwl annotations"
+            )
+        for notebook in steps:
+            builder.add_step(notebook, notebook_tools[notebook])
+    return builder.build()
 
 
 def _repo2cwl(git_directory_path: Repo) -> Tuple[str, List[Dict]]:
@@ -164,33 +395,111 @@ def _repo2cwl(git_directory_path: Repo) -> Tuple[str, List[Dict]]:
     :param git_directory_path:
     :return: The generated build image id & the cwl description
     """
+    image_id, notebook_tools = _repo2cwl_tools(git_directory_path)
+    return image_id, [tool for _, tool in notebook_tools]
+
+
+def _repo2cwl_tools(
+    git_directory_path: Repo,
+    build: bool = True,
+    docker_pull: Optional[str] = None,
+    per_step_images: bool = False,
+    step_image_template: Optional[str] = None,
+    image_overrides: Optional[Dict[str, str]] = None,
+) -> Tuple[str, List[Tuple[str, Dict]]]:
+    """
+    Same as _repo2cwl, but keeps track of the notebook each tool comes from.
+    :param git_directory_path: the repository (it is modified and committed)
+    :param build: build the image(s)
+    :param docker_pull: image name; when set the tools reference it with dockerPull
+    :param per_step_images: one image per tool on top of the repository image
+    :param step_image_template: name template of the step images (see step_images)
+    :param image_overrides: notebook path (relative to the repo) -> step image name
+    :return: The (base) image id & a list of (notebook path relative to the repo, tool)
+    """
     r2d = Repo2Docker()
     r2d.target_repo_dir = os.path.join(os.path.sep, "app")
     r2d.repo = git_directory_path.tree().abspath
-    bin_path = os.path.join(r2d.repo, "cwl", "bin")
-    os.makedirs(bin_path, exist_ok=True)
-    notebooks_paths = _get_notebook_paths_from_dir(r2d.repo)
+    if docker_pull:
+        r2d.output_image_spec = docker_pull
+    if per_step_images:
+        # the scripts go into the step images only, not into the base image
+        bin_path = tempfile.mkdtemp(prefix="repo2cwl_bin_")
+    else:
+        bin_path = os.path.join(r2d.repo, "cwl", "bin")
+        os.makedirs(bin_path, exist_ok=True)
+    notebooks_paths = sorted(_get_notebook_paths_from_dir(r2d.repo))
 
     tools = []
-    for notebook in notebooks_paths:
-        cwl_command_line_tool, script_name = _store_jn_as_script(
-            notebook, git_directory_path.tree().abspath, bin_path, r2d.output_image_spec
-        )
-        if cwl_command_line_tool is None or script_name is None:
-            continue
-        cwl_command_line_tool["baseCommand"] = os.path.join(
-            "/app", "cwl", "bin", script_name
-        )
-        tools.append(cwl_command_line_tool)
-    git_directory_path.index.commit("auto-commit")
+    scripts = {}
+    try:
+        for notebook in notebooks_paths:
+            cwl_command_line_tool, script_name = _store_jn_as_script(
+                notebook, git_directory_path.tree().abspath, bin_path, r2d.output_image_spec
+            )
+            if cwl_command_line_tool is None or script_name is None:
+                continue
+            cwl_command_line_tool["baseCommand"] = os.path.join(
+                "/app", "cwl", "bin", script_name
+            )
+            relative_notebook = os.path.normpath(os.path.relpath(notebook, r2d.repo))
+            tools.append((relative_notebook, cwl_command_line_tool))
+            scripts[relative_notebook] = script_name
+        git_directory_path.index.commit("auto-commit")
 
-    r2d.build()
-    # fix dockerImageId
-    for cwl_command_line_tool in tools:
-        cwl_command_line_tool["hints"]["DockerRequirement"][
-            "dockerImageId"
-        ] = r2d.output_image_spec
+        if build:
+            r2d.build()
+        if per_step_images:
+            _assign_step_images(
+                tools, scripts, bin_path, r2d.output_image_spec, build,
+                step_image_template, image_overrides or {},
+            )
+        else:
+            for _, cwl_command_line_tool in tools:
+                if docker_pull:
+                    cwl_command_line_tool["hints"]["DockerRequirement"] = {
+                        "dockerPull": docker_pull
+                    }
+                else:
+                    cwl_command_line_tool["hints"]["DockerRequirement"][
+                        "dockerImageId"
+                    ] = r2d.output_image_spec
+    finally:
+        if per_step_images:
+            shutil.rmtree(bin_path, ignore_errors=True)
     return r2d.output_image_spec, tools
+
+
+def _assign_step_images(
+    tools, scripts, bin_path, base_image, build, template, overrides
+) -> None:
+    """Name (and build) one image per tool and reference it from the tool."""
+    from .workflow import step_id_from_notebook
+
+    names: Dict[str, str] = {}
+    for notebook, tool in tools:
+        image = overrides.get(notebook) or step_image_name(
+            base_image, step_id_from_notebook(notebook), template
+        )
+        if image in names.values() or image == base_image:
+            raise WorkflowError(
+                f"step image {image} of {notebook} is already used; set a distinct "
+                "`image` for this step in the manifest"
+            )
+        names[notebook] = image
+        tool["hints"]["DockerRequirement"] = {"dockerPull": image}
+        if build:
+            build_step_image(
+                base_image,
+                image,
+                os.path.join(bin_path, scripts[notebook]),
+                tool["baseCommand"],
+                labels={
+                    "org.opencontainers.image.title": step_id_from_notebook(notebook),
+                    "org.opencontainers.image.base.name": base_image,
+                    "io.github.ipython2cwl.notebook": notebook,
+                },
+            )
 
 
 if __name__ == "__main__":

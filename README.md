@@ -42,6 +42,16 @@ pip install ipython2cwl
 jupyter repo2cwl https://github.com/giannisdoukas/cwl-annotated-jupyter-notebook.git -o .
 ```
 
+### Step notebooks to a CWL Workflow
+
+```
+jupyter repo2cwl . -o cwl_output --workflow-manifest workflow.yml --docker-pull ghcr.io/org/repo:tag
+```
+
+writes one CommandLineTool per annotated notebook plus a packed Workflow (`$graph`) chaining them, wired by
+variable names and, where needed, by the manifest. Add `--per-step-images` to build one thin image per step on
+top of the repository image (listed in `cwl_output/images.txt`). See the docs, section "From step notebooks to a CWL workflow".
+
 ### Docs
 
 [https://ipython2cwl.readthedocs.io/](https://ipython2cwl.readthedocs.io/en/latest/)
