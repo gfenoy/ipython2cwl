@@ -170,8 +170,9 @@ class TestCWLTool(TestCase):
             converter._tree, converter._variables
         )
         print('\n' + new_script, '\n')
-        exec(new_script)
-        locals()['main']('new message')
+        namespace = {}  # exec() no longer updates locals() (PEP 667, Python 3.13)
+        exec(new_script, globals(), namespace)
+        namespace['main']('new message')
         self.assertEqual('new message', globals()['printed_message'])
 
     def test_AnnotatedIPython2CWLToolConverter_wrap_script_to_method_removes_ipython2cwl_imports(
@@ -232,8 +233,9 @@ class TestCWLTool(TestCase):
         )
         self.assertNotIn(CWLFilePathOutput.__name__, new_script)
         print('\n' + new_script, '\n')
-        exec(new_script)
-        locals()['main']()
+        namespace = {}  # exec() no longer updates locals() (PEP 667, Python 3.13)
+        exec(new_script, globals(), namespace)
+        namespace['main']()
         with open(output_file_path) as f:
             self.assertEqual("hello world", f.read())
         os.remove(output_file_path)
@@ -336,8 +338,9 @@ class TestCWLTool(TestCase):
             ]
         )
         print('\n' + new_script, '\n')
-        exec(new_script_without_magics)
-        locals()['main']('original\n!ls -l')
+        namespace = {}  # exec() no longer updates locals() (PEP 667, Python 3.13)
+        exec(new_script_without_magics, globals(), namespace)
+        namespace['main']('original\n!ls -l')
         self.assertEqual('original\n!ls -l', globals()['printed_message'])
 
     def test_AnnotatedIPython2CWLToolConverter_optional_array_input(self):
@@ -433,9 +436,10 @@ class TestCWLTool(TestCase):
                 os.remove(f)
             except FileNotFoundError:
                 pass
-        exec(generated_script)
+        namespace = {}  # exec() no longer updates locals() (PEP 667, Python 3.13)
+        exec(generated_script, globals(), namespace)
         print(generated_script)
-        locals()['main']()
+        namespace['main']()
         with open('message') as f:
             self.assertEqual('this is a text from a dumpable', f.read())
         with open('message2') as f:
@@ -474,9 +478,10 @@ class TestCWLTool(TestCase):
                 os.remove(f)
             except FileNotFoundError:
                 pass
-        exec(generated_script)
+        namespace = {}  # exec() no longer updates locals() (PEP 667, Python 3.13)
+        exec(generated_script, globals(), namespace)
         print(generated_script)
-        locals()['main']()
+        namespace['main']()
         import pandas
 
         data_file = pandas.read_csv('dumpable.csv', sep="\t")
@@ -517,8 +522,9 @@ class TestCWLTool(TestCase):
             os.remove('new_data.png')
         except FileNotFoundError:
             pass
-        exec(new_script)
-        locals()['main']()
+        namespace = {}  # exec() no longer updates locals() (PEP 667, Python 3.13)
+        exec(new_script, globals(), namespace)
+        namespace['main']()
         self.assertTrue(os.path.isfile('new_data.png'))
         os.remove('new_data.png')
 
@@ -556,8 +562,9 @@ class TestCWLTool(TestCase):
             os.remove('new_data.png')
         except FileNotFoundError:
             pass
-        exec(new_script)
-        locals()['main']()
+        namespace = {}  # exec() no longer updates locals() (PEP 667, Python 3.13)
+        exec(new_script, globals(), namespace)
+        namespace['main']()
         self.assertTrue(os.path.isfile('new_data.png'))
         os.remove('new_data.png')
 
